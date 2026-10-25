@@ -1,0 +1,13 @@
+{
+  "name": "gre-prep",
+  "version": "1.0.0",
+  "description": "GRE practice app served on your local network, powered by the Claude Code CLI.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
