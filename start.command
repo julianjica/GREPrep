@@ -10,9 +10,10 @@ if ! command -v node >/dev/null 2>&1; then
   read -n 1 -s -r -p "Press any key to close."
   exit 1
 fi
-if ! command -v claude >/dev/null 2>&1 && [ -z "$CLAUDE_BIN" ]; then
-  echo "Warning: the Claude Code CLI ('claude') was not found. The app will run, but AI features need it."
-  echo "Install: npm install -g @anthropic-ai/claude-code   then run 'claude' once to sign in."
+if ! command -v claude >/dev/null 2>&1 && [ -z "$CLAUDE_BIN" ] && ! command -v codex >/dev/null 2>&1 && [ -z "$CODEX_BIN" ]; then
+  echo "Warning: no AI assistant CLI was found. The app will run, but AI features need Claude Code or Codex."
+  echo "Claude Code: npm install -g @anthropic-ai/claude-code   then run 'claude' once to sign in."
+  echo "Codex:       npm install -g @openai/codex               then run 'codex login'."
   echo
 fi
 

@@ -3,7 +3,7 @@ import { esc, icon, md, clock, pct, meter, relDay } from './ui.js';
 
 const app = document.getElementById('app');
 let S = null;                       // state from the server (progress lives on the host computer)
-let agent = { ok: null };           // Claude Code CLI status
+let agent = { ok: null };           // selected AI assistant CLI status (+ every assistant's under .providers)
 const ui = {
   session: null, exam: null, vocab: null, lessonStep: {}, mistakeFilter: null, planDay: 0, onboardingStep: 0,
   gen: { type: 'quantComparison', difficulty: 'medium', count: 5, focusWeak: true, job: null, showRejected: false, polling: null },
@@ -600,7 +600,7 @@ function viewGenerate() {
   const agentWarn = agent.ok === false ? `<div class="callout bad small"><strong>Agent offline.</strong> ${esc(agent.error)}</div>` : '';
   if (!job) {
     return `${backLink('#/practice', 'Practice')}<h1 class="title">Generate questions</h1>
-      <p class="muted">The Claude Code agent on the host computer writes fresh GRE-style questions aimed at your weak spots, then checks each one before you see it.</p>
+      <p class="muted">The ${esc(agent.label || 'AI')} agent on the host computer writes fresh GRE-style questions aimed at your weak spots, then checks each one before you see it.</p>
       ${agentWarn}
       <div class="stack"><span class="h3">Question type</span><div class="row wrap" style="gap:8px">${Object.entries(C.TYPES).map(([id, t]) => `<button class="chip" data-action="gen-type" data-t="${id}" aria-pressed="${g.type === id}">${t.title}</button>`).join('')}</div></div>
       <div class="stack"><span class="h3">Difficulty</span><div class="segmented" role="group" aria-label="Difficulty">${['easy', 'medium', 'hard'].map((d) => `<button data-action="gen-diff" data-d="${d}" aria-pressed="${g.difficulty === d}">${d[0].toUpperCase() + d.slice(1)}</button>`).join('')}</div></div>
@@ -648,7 +648,7 @@ function viewTutor(id) {
     body = `<div class="messages"><div class="stack" style="margin:auto;max-width:480px;text-align:center;align-items:center">
         <span class="icon-tile t-accent" style="width:56px;height:56px">${icon('chat', 28)}</span>
         <h1 class="h2">Chat with your GRE tutor</h1>
-        <p class="muted small">A Claude Code agent running on the host computer. It knows your targets and weak topics. Ask about a problem, a concept, or how to plan your week.</p>
+        <p class="muted small">A ${esc(agent.label || 'AI')} agent running on the host computer. It knows your targets and weak topics. Ask about a problem, a concept, or how to plan your week.</p>
         ${suggestions(['Explain how to approach Quantitative Comparison', 'Quiz me on hard vocabulary', 'What should I focus on this week?', 'Give me a tricky probability question'])}
       </div></div>${composer(false)}`;
   } else if (!c) {
@@ -740,8 +740,12 @@ function describeAnswer(q, selected, numeric) {
 
 // ---------------------------------------------------------------- settings
 
+const PROVIDERS = { claude: 'Claude Code', codex: 'ChatGPT Codex' };
+
 function viewSettings() {
   const p = profile();
+  const provider = PROVIDERS[p.provider] ? p.provider : 'claude';
+  const st = agent.providers?.[provider];
   let theme = 'system';
   try { theme = localStorage.getItem('gre-theme') || 'system'; } catch {}
   return `<h1 class="title">Settings</h1>
@@ -749,10 +753,12 @@ function viewSettings() {
       <div class="segmented" role="group" aria-label="Theme">${['system', 'light', 'dark'].map((t) => `<button data-action="theme" data-t="${t}" aria-pressed="${theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}</div></section>
     <a class="card row between" href="#/goal"><span><span class="h3" style="display:block">Goal</span><span class="small muted">Test ${new Date(p.testDate).toLocaleDateString()} · Target ${p.targetQuant + p.targetVerbal} · ${p.dailyMinutes} min/day</span></span>${icon('chevron', 18)}</a>
     <section class="card stack"><h2 class="h3">Agent</h2>
-      <div class="row small"><span class="dot ${agent.ok ? 'ok' : agent.ok === false ? 'bad' : ''}"></span>${agent.ok ? `Claude Code ${esc(agent.version)} on the host computer` : agent.ok === false ? esc(agent.error) : 'Checking…'}</div>
+      <p class="xs muted">Which AI assistant on the host computer writes questions, scores essays and tutors. It uses that assistant's sign-in there.</p>
+      <div class="segmented" role="group" aria-label="AI assistant">${Object.entries(PROVIDERS).map(([k, name]) => `<button data-action="provider" data-p="${k}" aria-pressed="${provider === k}">${name}</button>`).join('')}</div>
+      <div class="row small"><span class="dot ${st?.ok ? 'ok' : st?.ok === false ? 'bad' : ''}"></span>${st?.ok ? `${esc(st.label)} ${esc(st.version)} on the host computer` : st?.ok === false ? esc(st.error) : 'Checking…'}</div>
       <label class="lbl" for="model">Model</label>
-      <input class="field" id="model" data-input="model" value="${esc(p.model)}" placeholder="Default (whatever Claude Code uses)">
-      <p class="xs muted">Optional. Examples: sonnet, opus. Leave empty to use Claude Code's default.</p>
+      <input class="field" id="model" data-input="model" value="${esc(provider === 'codex' ? p.codexModel ?? '' : p.model)}" placeholder="Default (whatever ${PROVIDERS[provider]} uses)">
+      <p class="xs muted">Optional. Examples: ${provider === 'codex' ? 'gpt-5, gpt-5-codex' : 'sonnet, opus'}. Leave empty to use ${PROVIDERS[provider]}'s default.</p>
       <button class="btn small secondary" style="align-self:flex-start" data-action="model-save">Save model</button></section>
     <section class="card stack"><h2 class="h3">Data</h2><p class="small muted">Your progress is saved on the host computer in the app's data folder. ${S.attempts.length} answers, ${S.saved.length} agent questions, ${S.chats.length} conversations.</p>
       <button class="btn small secondary" style="align-self:flex-start;color:var(--wrong)" data-action="reset">Reset all progress</button></section>
@@ -933,7 +939,16 @@ const actions = {
     if (d.t === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = d.t;
     render();
   },
-  'model-save': () => { saveProfile({ model: document.getElementById('model').value.trim() }); toast('Model saved'); },
+  'model-save': () => {
+    saveProfile({ [S.profile.provider === 'codex' ? 'codexModel' : 'model']: document.getElementById('model').value.trim() });
+    toast('Model saved');
+  },
+  async provider(d) {
+    await saveProfile({ provider: d.p });
+    agent = { ...(agent.providers?.[d.p] ?? { ok: null }), providers: agent.providers };
+    render();
+    toast(`Using ${PROVIDERS[d.p]}`);
+  },
   async reset() {
     if (!confirm('Delete all answers, mistakes, essays, conversations and generated questions?')) return;
     await api('/api/reset', { method: 'POST' });

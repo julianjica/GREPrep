@@ -1,7 +1,7 @@
 // GRE Prep — local server. Run on your computer, open from any device on the same Wi-Fi.
 //   node server.js            (or double-click start.command on a Mac)
 // Environment options: PORT (default 8742), GRE_PIN (fixed access code), GRE_NO_PIN=1 (disable the code),
-// CLAUDE_BIN (path to the claude CLI), GRE_DATA_DIR (where progress is saved).
+// CLAUDE_BIN / CODEX_BIN (paths to the AI assistant CLIs), GRE_DATA_DIR (where progress is saved).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,7 +9,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Store } from './lib/db.js';
-import { configureAgent, ask, askJSON, chat, status as agentStatus } from './lib/agent.js';
+import { configureAgent, setProvider, getProvider, PROVIDERS, ask, askJSON, chat, status as agentStatus } from './lib/agent.js';
 import { startJob, getJob, cancelJob, plainText } from './lib/generator.js';
 import { BANK, TYPES, ESSAY_INSTRUCTIONS, topicAccuracy, daysUntil, sectionOf, answerText, estimateScore } from './public/content.js';
 
@@ -21,6 +21,9 @@ const PUBLIC = path.join(ROOT, 'public');
 const store = new Store(DATA_DIR);
 configureAgent({ dataDir: DATA_DIR });
 const db = () => store.data;
+setProvider(db().profile.provider);
+// Model names differ between Claude Code and Codex, so each provider keeps its own.
+const aiModel = () => (getProvider() === 'codex' ? db().profile.codexModel : db().profile.model);
 
 // ---------- access code (keeps other people on the same Wi-Fi out) ----------
 const PIN_REQUIRED = process.env.GRE_NO_PIN !== '1';
@@ -138,8 +141,10 @@ async function api(req, res, url) {
 
   if (p === '/api/profile' && m === 'PUT') {
     const body = await readBody(req);
-    const allowed = ['onboarded', 'targetQuant', 'targetVerbal', 'testDate', 'dailyMinutes', 'model'];
+    const allowed = ['onboarded', 'targetQuant', 'targetVerbal', 'testDate', 'dailyMinutes', 'model', 'codexModel', 'provider'];
     for (const k of allowed) if (k in body) db().profile[k] = body[k];
+    if (!PROVIDERS[db().profile.provider]) db().profile.provider = 'claude';
+    setProvider(db().profile.provider);
     store.save();
     return send(res, 200, db().profile);
   }
@@ -180,14 +185,18 @@ async function api(req, res, url) {
   }
 
   // ---- agent: status ----
-  if (p === '/api/agent/status' && m === 'GET') return send(res, 200, await agentStatus());
+  if (p === '/api/agent/status' && m === 'GET') {
+    // The selected assistant's status at the top level, plus every assistant's so Settings can offer the choice.
+    const all = Object.fromEntries(await Promise.all(Object.keys(PROVIDERS).map(async (k) => [k, await agentStatus(k)])));
+    return send(res, 200, { ...all[getProvider()], providers: all });
+  }
 
   // ---- agent: question generation ----
   if (p === '/api/generate' && m === 'POST') {
     const { type, difficulty = 'medium', count = 5, topics = [] } = await readBody(req);
     if (!TYPES[type]) return send(res, 400, { error: 'Unknown type' });
     const job = startJob({
-      type, difficulty, count: Math.max(1, Math.min(20, Number(count) || 5)), topics, existing: allQuestions(), model: db().profile.model,
+      type, difficulty, count: Math.max(1, Math.min(20, Number(count) || 5)), topics, existing: allQuestions(), model: aiModel(),
       onAccepted(q, checks) { db().saved.push({ question: q, checks, created: Date.now() }); store.save(); },
     });
     return send(res, 200, { id: job.id });
@@ -205,7 +214,7 @@ async function api(req, res, url) {
     const { question } = await readBody(req);
     const q = findQuestion(question?.id) ?? question;
     const { text } = await ask(`${plainText(q)}\n\nThe answer is ${answerText(q)} (do NOT reveal it). Give the student one short hint (1-3 sentences) that points them toward the right approach without giving away the answer or eliminating all wrong choices.`, {
-      system: 'You are a GRE tutor giving a single, short, non-revealing hint.', model: db().profile.model, timeoutMs: 120000,
+      system: 'You are a GRE tutor giving a single, short, non-revealing hint.', model: aiModel(), timeoutMs: 120000,
     });
     return send(res, 200, { hint: text.trim() });
   }
@@ -216,7 +225,7 @@ async function api(req, res, url) {
     if (!prompt || !text || text.split(/\s+/).length < 30) return send(res, 400, { error: 'Write at least 30 words first.' });
     const j = await askJSON(`Issue statement: ${prompt}\nTask: ${ESSAY_INSTRUCTIONS}\n\nResponse:\n"""\n${text}\n"""\n\nReturn {"score": number, "traits": {"Position & insight": number, "Reasoning & examples": number, "Organization": number, "Language & grammar": number}, "strengths": ["one or two specific strengths"], "improvements": ["two or three specific, actionable changes that would raise the score"]}`, {
       system: 'You are an experienced GRE Analytical Writing rater. Score Analyze an Issue responses holistically on the official 0–6 scale in half-point steps, as trained ETS raters do. Be honest and specific; do not inflate scores.',
-      model: db().profile.model, timeoutMs: 180000,
+      model: aiModel(), timeoutMs: 180000,
     });
     const feedback = {
       score: Math.max(0, Math.min(6, Number(j.score) || 0)),
@@ -255,7 +264,14 @@ async function api(req, res, url) {
 
     // First message of a conversation started from a question carries that question as context.
     let prompt = text.trim();
-    if (!c.sessionId && c.context?.question) {
+    // A session belongs to the assistant that started it. After switching assistants, start a new
+    // session and hand over the conversation so far.
+    if (c.sessionId && (c.provider ?? 'claude') !== getProvider()) {
+      c.sessionId = null;
+      const history = c.messages.map((x) => `${x.role === 'user' ? 'Student' : 'Tutor'}: ${x.text}`).join('\n\n');
+      if (history) prompt = `Our conversation so far:\n\n${history}\n\nNow, continuing:\n${prompt}`;
+    }
+    if (!c.sessionId && !c.messages.length && c.context?.question) {
       const q = findQuestion(c.context.question.id) ?? c.context.question;
       prompt = `I'm working on this GRE question:\n\n${plainText(q)}\n\nCorrect answer: ${answerText(q)}\nExplanation from the app: ${q.explanation}\n` +
         (c.context.studentAnswer ? `My answer was: ${c.context.studentAnswer}\n` : '') + `\n${prompt}`;
@@ -271,10 +287,11 @@ async function api(req, res, url) {
     const write = (obj) => { if (!res.writableEnded) res.write(JSON.stringify(obj) + '\n'); };
     try {
       const result = await chat(prompt, {
-        system: TUTOR_SYSTEM(), model: db().profile.model, sessionId: c.sessionId, signal: controller.signal,
+        system: TUTOR_SYSTEM(), model: aiModel(), sessionId: c.sessionId, signal: controller.signal,
         onDelta: (t) => write({ t: 'delta', text: t }),
       });
       c.sessionId = result.sessionId ?? c.sessionId;
+      c.provider = getProvider();
       if (result.text) c.messages.push({ role: 'assistant', text: result.text, at: Date.now() });
       c.updated = Date.now();
       store.save();
@@ -342,7 +359,7 @@ server.on('listening', async () => {
   for (const a of addrs) console.log(`  On other devices:      http://${a.address}:${PORT}   [${a.name}: ${a.label}]`);
   console.log(`  (or try)              http://${host}.local:${PORT}`);
   if (PIN_REQUIRED) console.log(`\n  Access code for other devices: ${PIN}`);
-  console.log(st.ok ? `\n  Agent: Claude Code ${st.version}` : `\n  Agent: NOT AVAILABLE — ${st.error}`);
+  console.log(st.ok ? `\n  Agent: ${st.label} ${st.version}` : `\n  Agent (${st.label}): NOT AVAILABLE — ${st.error}`);
   console.log('\n  Keep this window open while studying. Press Ctrl+C to stop.\n');
 });
 
